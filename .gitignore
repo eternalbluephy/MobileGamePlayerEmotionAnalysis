@@ -1,4 +1,11 @@
+# py库
 **/.venv/
+# py缓存
 **/__pycache__
+# 缓存
 /cache/
+# 测试
 /res.*
+**/test.*
+# 密钥
+**/secret.*
