@@ -19,13 +19,17 @@ from bili.api.wbi import getWbiKeys, encWbi
 class BiliCrawler:
 
   lock = asyncio.Lock()
+  crawler_count = 0
 
   def __init__(self, headers: Optional[dict[str, str]] = None, max_pages: int = int(1e9)):
     self.collection = MongoDB.client["MobileGameComments"]["bilibili"]
     self.headers = headers
-    self.logger = get_logger("BiliLogger")
     self.max_pages = max_pages
     self.img_key, self.sub_key = getWbiKeys()
+    # 爬虫ID
+    BiliCrawler.crawler_count += 1
+    self.id = BiliCrawler.crawler_count
+    self.logger = get_logger(f"Bilibili#{self.id}")
 
   async def fetch_one_reply_reply(self, session: aiohttp.ClientSession, aid: int, rpid: int, page: int) -> Optional[list[dict]]:
     async def run_once():
@@ -56,14 +60,14 @@ class BiliCrawler:
       self.logger.warning(f"响应信息中没有键：{e}")
     except json.decoder.JSONDecodeError as e:
       self.logger.error(f"非JSON格式数据") # 大概率风控
-      self.logger.warning("大概率风控，线程睡眠300秒，所有爬虫暂停...")
+      self.logger.warning("大概率风控，线程睡眠600秒，所有爬虫暂停...")
       while True:
-        sleep(300)
+        sleep(600)
         self.logger.info("重试中")
         try:
           return await run_once()
         except json.decoder.JSONDecodeError as e:
-          self.logger.warning("依然风控，继续睡300秒")
+          self.logger.warning("依然风控，继续等待600秒")
           continue
         except:
           return
@@ -71,12 +75,12 @@ class BiliCrawler:
       self.logger.exception(e)
       return
     
-  async def fetch_one_page(self, session: aiohttp.ClientSession, aid: int, sort: Sort | int, page: int) -> Optional[dict[str, str]]:
+  async def fetch_one_page(self, session: aiohttp.ClientSession, aid: int, page: int) -> Optional[dict[str, str]]:
     """爬取某个视频的某一页的所有评论"""
     comments = []
     self.logger.info(f"正在爬取视频 av{aid} 第{page}页")
     try:
-      data = await api.fetch_reply(session, oid=str(aid), sort=sort, pn=page)
+      data = await api.fetch_reply_wbi(session, oid=str(aid), page=page, img_key=self.img_key, sub_key=self.sub_key)
       data = json.loads(data)
 
       code = int(data["code"])
@@ -100,17 +104,19 @@ class BiliCrawler:
         comment["time"] = reply["ctime"]
         comment["content"] = reply["content"]["message"]
         comment["like"] = reply["like"]
+        has_sub_comments = "sub_reply_entry_text" in reply["reply_control"] or "sub_reply_title_text" in reply["reply_control"]
         # 子评论
         sub_comments = []
-        for page in range(1, int(1e9)):
-          one_sub_comments = await self.fetch_one_reply_reply(session, aid, rpid, page)
-          if one_sub_comments is None:
-            return
-          elif one_sub_comments:
-            sub_comments.extend(one_sub_comments)
-          else:
-            break
-          await random_sleep(0.3, 0.4)
+        if has_sub_comments:
+          for page in range(1, int(1e9)):
+            one_sub_comments = await self.fetch_one_reply_reply(session, aid, rpid, page)
+            if one_sub_comments is None:
+              return
+            elif one_sub_comments:
+              sub_comments.extend(one_sub_comments)
+            else:
+              break
+            await random_sleep(0.3, 0.4)
 
         comment["replies"] = sub_comments
         comments.append(comment)
@@ -120,11 +126,11 @@ class BiliCrawler:
       self.logger.exception(e)
     return comments
     
-  async def fetch_video_comments(self, session: aiohttp.ClientSession, aid: int, sort: Sort | int, start_page: int = 1) -> dict[str, str]:
+  async def fetch_video_comments(self, session: aiohttp.ClientSession, aid: int, start_page: int = 1) -> dict[str, str]:
     """爬取某个视频的评论区的所有评论"""
     self.logger.info(f"正在爬取视频 av{aid} 评论区的所有评论，从第{start_page}页开始")
     for page in range(start_page, self.max_pages + 1):
-      comments = await self.fetch_one_page(session, aid=aid, sort=sort, page=page)
+      comments = await self.fetch_one_page(session, aid=aid, page=page)
       if comments is None:
         self.logger.warning("无法获取视频评论，跳过")
         return
@@ -185,21 +191,15 @@ class BiliCrawler:
             await self.collection.insert_one(document)
           last_page = 0
           await random_sleep(0.1, 0.3)
-        elif last_page == -1:
-          self.logger.info("该视频已爬取结束，跳过")
-          await random_sleep(0.1, 0.3)
-          continue
         else:
           self.logger.info("数据库中已存在该视频，将在已存储的数据的基础上更新")
 
         #################################################################
         # 评论区
         #################################################################
-        await self.fetch_video_comments(session, aid, Sort.ByLikes, start_page=last_page + 1)
+        await self.fetch_video_comments(session, aid, start_page=last_page + 1)
         
         self.logger.info(f"视频 av{aid} 爬取完毕")
-        async with BiliCrawler.lock:
-          await self.collection.update_one({"_id": aid}, {"$set": {"last_page": -1}})
         await random_sleep(0.2, 0.4)
 
   async def stop(self) -> None: ...
@@ -270,7 +270,7 @@ if __name__ == "__main__":
     "accept-language": "en,zh-CN;q=0.9,zh;q=0.8",
   }
   MongoDB()
-  crawlers = [BiliCrawler(headers=HEADERS)] * 2
+  crawlers = [BiliCrawler(headers=HEADERS) for _ in range(2)]
 
   GENSHIN_MID = 401742377
   GENSHIN_AIDS = asyncio.run(crawlers[0].fetch_all_user_videos(401742377))
