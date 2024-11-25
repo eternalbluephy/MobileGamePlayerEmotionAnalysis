@@ -34,7 +34,7 @@ class BiliCrawler:
       data = json.loads(res)
       code = int(data["code"])
       if code != 0:
-        self.logger.warning(f"获取评论的回复失败，代码：{code}，原因：{STATUS_CODES.get(code, "未知")}")
+        self.logger.warning(f"获取评论的回复失败，代码：{code}，原因：{STATUS_CODES.get(code, '未知')}")
         return
 
       replies = data["data"]["replies"]
@@ -81,7 +81,7 @@ class BiliCrawler:
 
       code = int(data["code"])
       if code != 0:
-        self.logger.warning(f"获取评论失败，代码：{code}，原因：{STATUS_CODES.get(code, "未知")}")
+        self.logger.warning(f"获取评论失败，代码：{code}，原因：{STATUS_CODES.get(code, '未知')}")
         if code == StatusCode.Closed:
           return comments
         else:
@@ -143,7 +143,7 @@ class BiliCrawler:
       data = json.loads(res)
       code = int(data["code"])
       if code != 0:
-        self.logger.warning(f"获取视频信息失败，代码：{code}，原因：{STATUS_CODES.get(code, "未知")}")
+        self.logger.warning(f"获取视频信息失败，代码：{code}，原因：{STATUS_CODES.get(code, '未知')}")
         return
       return {
         "author": data["data"]["owner"]["name"],
@@ -220,7 +220,7 @@ class BiliCrawler:
           data = json.loads(await api.fetch_user_videos(session, mid, pn=page, img_key=self.img_key, sub_key=self.sub_key))
           code = data["code"]
           if code != 0:
-            self.logger.warning(f"获取用户投稿视频失败，代码：{code}，原因：{STATUS_CODES.get(code, "未知")}")
+            self.logger.warning(f"获取用户投稿视频失败，代码：{code}，原因：{STATUS_CODES.get(code, '未知')}")
             break
           vlist = data["data"]["list"]["vlist"]
           if not vlist:
