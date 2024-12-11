@@ -9,3 +9,7 @@
 **/test.*
 # 密钥
 **/secret.*
+# 标头
+**/headers.*
+# 代理ip
+/proxies.txt

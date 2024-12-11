@@ -4,7 +4,7 @@ from typing import Optional, Sequence
 
 class MongoDB:
 
-  client: Optional["MongoDB"] = None
+  client: Optional[motor_asyncio.AsyncIOMotorClient] = None
   
   def __init__(self, host: str = "localhost", port: int = 27017, username: Optional[str] = None, password: Optional[str] = None) -> None:
     if username is None and password is None:
