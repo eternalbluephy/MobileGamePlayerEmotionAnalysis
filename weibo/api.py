@@ -1,5 +1,5 @@
 import sys
-from aiohttp import ClientSession
+from httpx import AsyncClient
 from typing import Optional
 from pathlib import Path
 
@@ -10,20 +10,24 @@ from common.api import AsyncAPI
 
 class get_user_blogs(AsyncAPI):
   @staticmethod
-  async def call(session: ClientSession,
-           uid: int,
-           page: int = 1,
-           since_id: Optional[str] = None) -> str:
+  async def call(client: AsyncClient,
+                 uid: int,
+                 page: int = 1,
+                 since_id: Optional[str] = None) -> str:
     url = f"https://weibo.com/ajax/statuses/mymblog?uid={uid}&page={page}&feature=0"
     if since_id is not None:
       url += f"&sinceId={since_id}"
-    async with session.get(url) as response:
-      return await response.text(encoding="utf-8")
+    return (await client.get(url)).text
+  
+  @staticmethod
+  async def test(headers = None, proxies = None) -> str:
+    async with AsyncClient(headers=headers, proxies=proxies) as client:
+      return await get_user_blogs.call(client, 6593199887, 1, None)
   
 
 class get_comments(AsyncAPI):
   @staticmethod
-  async def call(session: ClientSession,
+  async def call(client: AsyncClient,
                  uid: int, id: int,
                  is_asc: Optional[int] = None,
                  flow: Optional[int] = None,
@@ -47,8 +51,12 @@ class get_comments(AsyncAPI):
       url += f"&is_asc={is_asc}"
     if flow is not None:
       url += f"&flow={flow}"
-    async with session.get(url) as response:
-      return await response.text(encoding="utf-8")
+    return (await client.get(url)).text
+
+  @staticmethod
+  async def test(headers = None, proxies = None):
+    async with AsyncClient(headers=headers, proxies=proxies) as client:
+      return await get_comments.call(client, 6593199887, 5100218874073938, 1, None)
   
 
 if __name__ == "__main__":
@@ -59,10 +67,7 @@ if __name__ == "__main__":
   HEADERS_PATH = pathlib.Path(__file__).parent.joinpath("headers.json")
   with open(HEADERS_PATH, "r", encoding="utf-8") as f:
     headers = json.load(f)
-
-  async def test_get_user_blogs(uid: int, page: int = 1, since_id: Optional[str] = None):
-    async with ClientSession(headers=headers) as session:
-      return await get_user_blogs(session, uid, page, since_id)
   
+  res = asyncio.run(get_user_blogs.test(headers=headers))
   with open("./res.json", "w", encoding="utf-8") as f:
-    f.write(asyncio.run(test_get_user_blogs(6593199887, 2, "5102725391454353kp2")))
+    f.write(res)
