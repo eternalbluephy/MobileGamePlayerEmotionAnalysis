@@ -1,8 +1,7 @@
 import asyncio
 from random import uniform
-from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Literal
+from typing import Any
 
 class Err(Enum):
   IP_BANNED = 1,
@@ -12,7 +11,7 @@ class Err(Enum):
   NOT_EXISTS = 5,
 
 # golang like
-CrawlResult = tuple[bool, Err]
+CrawlResult = tuple[bool, Any]
 
 
 class CrawlerRunner:...
