@@ -1,4 +1,5 @@
 from motor import motor_asyncio
+from motor.motor_asyncio import AsyncIOMotorCollection
 from typing import Optional, Sequence
 from pymongo import UpdateOne
 
@@ -10,9 +11,10 @@ class MongoDB:
     else:
       self.client = motor_asyncio.AsyncIOMotorClient(f"mongodb://{username}:{password}@{host}:{port}")
 
-  async def upsert_many(self, collection, documents: list[dict]) -> None:
+  @staticmethod
+  async def upsert_many(collection: AsyncIOMotorCollection, documents: list[dict], session = None) -> None:
     upserts = MongoDB.make_upserts(documents)
-    return await collection.bulk_write(upserts)
+    return await collection.bulk_write(upserts, session=session)
 
   @staticmethod
   def make_upserts(documents: list[dict]) -> list[UpdateOne]:
