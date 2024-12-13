@@ -2,6 +2,7 @@ import sys
 import json
 import asyncio
 import httpx
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 from time import sleep
@@ -22,7 +23,7 @@ class BiliCrawler:
   crawler_count = 0
 
   def __init__(self):
-    self.db = MongoDB.client["MobileGameComments"]
+    self.db = MongoDB().client["MobileGameComments"]
     self.img_key, self.sub_key = getWbiKeys()
     # 爬虫ID
     BiliCrawler.crawler_count += 1
@@ -99,32 +100,30 @@ class BiliCrawler:
         self.logger.info(f"已到达视频 av{aid} 评论最后一页")
         return False, Err.EOF
       
-      async with await MongoDB.client.start_session() as session:
-          async with session.start_transaction():
-            for reply in replies:
-              comment = {}
-              comment["rpid"] = reply["rpid"]
-              comment["aid"] = aid
-              comment["level"] = reply["member"]["level_info"]["current_level"]
-              comment["time"] = reply["ctime"]
-              comment["content"] = reply["content"]["message"]
-              comment["like"] = reply["like"]
-              comment["rpid"] = reply["rpid"]
-              comment["is_root"] = True
-              await self.db["BilibiliComments"].insert_one(comment)
-              # 子评论
-              for rreply in reply["replies"]:
-                sub_comment = {}
-                sub_comment["rpid"] = rreply["rpid"]
-                sub_comment["aid"] = aid
-                sub_comment["level"] = rreply["member"]["level_info"]["current_level"]
-                sub_comment["time"] = rreply["ctime"]
-                sub_comment["content"] = rreply["content"]["message"]
-                sub_comment["like"] = rreply["like"]
-                sub_comment["rpid"] = rreply["rpid"]
-                sub_comment["is_root"] = False
-                await self.db["BilibiliComments"].insert_one(sub_comment)
-            await self.db["BilibiliVideos"].update_one({"_id": aid}, {"$set": {"last_page": page}})
+      for reply in replies:
+        comment = {}
+        comment["rpid"] = reply["rpid"]
+        comment["aid"] = aid
+        comment["level"] = reply["member"]["level_info"]["current_level"]
+        comment["time"] = reply["ctime"]
+        comment["content"] = reply["content"]["message"]
+        comment["like"] = reply["like"]
+        comment["rpid"] = reply["rpid"]
+        comment["is_root"] = True
+        await self.db["BilibiliComments"].insert_one(comment)
+        # 子评论
+        for rreply in reply["replies"]:
+          sub_comment = {}
+          sub_comment["rpid"] = rreply["rpid"]
+          sub_comment["aid"] = aid
+          sub_comment["level"] = rreply["member"]["level_info"]["current_level"]
+          sub_comment["time"] = rreply["ctime"]
+          sub_comment["content"] = rreply["content"]["message"]
+          sub_comment["like"] = rreply["like"]
+          sub_comment["rpid"] = rreply["rpid"]
+          sub_comment["is_root"] = False
+          await self.db["BilibiliComments"].insert_one(sub_comment)
+      await self.db["BilibiliVideos"].update_one({"_id": aid}, {"$set": {"last_page": page}})
     except KeyError as e:
       self.logger.warning(f"响应信息中没有键：{e}")
       return False, Err.FAILED
@@ -136,7 +135,7 @@ class BiliCrawler:
       return False, Err.FAILED
     return True, None
     
-  async def fetch_video_comments(self, client: httpx.Client, aid: int, start_page: int = 1, max_pages: int = 300) -> CrawlResult:
+  async def fetch_video_comments(self, client: httpx.Client, aid: int, start_page: int = 1, max_pages: int = 100) -> CrawlResult:
     """爬取某个视频的评论区的所有评论"""
     self.logger.info(f"正在爬取视频 av{aid} 评论区的所有评论，从第{start_page}页开始")
     for page in range(start_page, max_pages + 1):
@@ -161,6 +160,7 @@ class BiliCrawler:
         return
       return {
         "author": data["data"]["owner"]["name"],
+        "mid": data["data"]["owner"]["mid"],
         "title": data["data"]["title"],
         "view": data["data"]["stat"]["view"],
         "like": data["data"]["stat"]["like"],
@@ -197,7 +197,7 @@ class BiliCrawler:
         return res, err
         
     self.logger.info(f"视频 av{aid} 评论爬取完毕")
-    return True
+    return True, None
   
   async def run_get_video_info(self, aid: int, headers: Optional[dict] = None, proxy: Optional[str] = None) -> bool:
     self.logger.info(f"正在爬取视频 av{aid} 的基本信息")
@@ -219,7 +219,7 @@ class BiliCrawler:
           return False
         document.update(info)
         async with BiliCrawler.lock:
-          await self.db["BilibiliVideos"].insert_one(document)
+          await self.db["BilibiliVideos"].update_one({"_id": aid}, {"$set": document}, upsert=True)
         last_page = 0
         await random_sleep(0.3, 0.4)
       else:
@@ -232,6 +232,47 @@ class BiliCrawler:
     async with BiliCrawler.lock:
       result = await self.db["BilibiliVideos"].find_one({"_id": aid})
     return result if result is None else result["last_page"]
+  
+  async def run_fetch_all_user_videos(self,
+                                      mid: int,
+                                      **http_params) -> list[int]:
+    params = deepcopy(http_params)
+    params["headers"] = params.get("headers", {})
+    params["headers"]["Referer"] = f"https://space.bilibili.com/{mid}/video?pn=1"
+
+    self.logger.info(f"正在爬取用户 {mid} 的所有投稿视频")
+    aids = []
+    page = 1
+
+    async with httpx.AsyncClient(**params) as client:
+      while True:
+        self.logger.info(f"正在爬取第{page}页投稿")
+        try:
+          res = await api.fetch_user_videos(client, mid, pn=page, img_key=self.img_key, sub_key=self.sub_key)
+          data = json.loads(res)
+          code = data["code"]
+          if code != 0:
+            self.logger.warning(f"获取用户投稿视频失败，代码：{code}，原因：{STATUS_CODES.get(code, '未知')}")
+            break
+          vlist = data["data"]["list"]["vlist"]
+          if not vlist:
+            self.logger.info("最后一页，结束")
+            break
+          for video in vlist:
+            aids.append(video["aid"])
+          await random_sleep(1, 1)
+        except KeyError as e:
+          self.logger.warning(f"响应信息中没有键：{e}")
+          return False
+        except json.decoder.JSONDecodeError as e:
+          self.logger.exception(f"非JSON格式数据：{e}")
+          return False
+        except Exception as e:
+          self.logger.exception(e)
+          break
+        page += 1
+
+    return aids
   
 
 class BiliCrawlerRunner: ...
@@ -246,12 +287,13 @@ if __name__ == "__main__":
   PROXIES_PATH = pathlib.Path(__file__).parent.parent.parent.joinpath("proxies.txt")
   GENSHIN_AIDS_PATH = CACHE_PATH.joinpath("bili_genshin_aids.txt")
 
-  HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-    "Cookie": "buvid3=045FFA68-F00D-9CD3-51BD-CC7EFF43B56C74211infoc; b_nut=1727859074; _uuid=4103EF1011-5BE1-EF93-291E-B48F17BBE1010474375infoc; header_theme_version=CLOSE; enable_web_push=DISABLE; CURRENT_FNVAL=4048; rpdid=|(kJRYmJRmY|0J'u~k~)~)Rkl; buvid_fp_plain=undefined; buvid4=33D3C568-8110-0DA3-7F91-0EDEDD2FF65476357-024100208-EftFjGYzK8e%2BnmvtDmyFEYC8vC7CPXisBgZC93SEz739%2BeRPEAXBVPhLcxB9be7g; LIVE_BUVID=AUTO4417299433676539; PVID=2; DedeUserID=38921801; DedeUserID__ckMd5=b1bdb63ebdbbfd3c; fingerprint=0dab010e3e14d0ef598b5b67f1397bbf; buvid_fp=0dab010e3e14d0ef598b5b67f1397bbf; bp_t_offset_38921801=1003621801378447360; bili_ticket=eyJhbGciOiJIUzI1NiIsImtpZCI6InMwMyIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MzMzMTU1OTgsImlhdCI6MTczMzA1NjMzOCwicGx0IjotMX0.EqnhfHKemA49bC8tBoxGq0884vUafmnpt3BxxOOU8Xs; bili_ticket_expires=1733315538; SESSDATA=488130c2%2C1748608399%2Cae151%2Ac1CjBDDnv_NpZT_3IqLy_t0lLh-oNpjpMRY_rbsjfdE-da57Wrw8cjDkl0V0jNdSsYYegSVmc5T1l4emhwYzVqb2hRaVBzYzVvQV9YUlRxOXpIVUZlRWtXM3hNQ0hOcWNvR21sRlNDd3p4Q3JacDNUYU5WeS1XSDhhU0E3bURSUklDNkhKMHpCaUFBIIEC; bili_jct=d8ff7255312e4894f7333f253b642465; sid=74v0spmr; b_lsid=F64F619F_193876A5CE8; home_feed_column=4; browser_resolution=1098-992",
-  }
+  with open(pathlib.Path(__file__).parent.joinpath("headers.json")) as f:
+    headers = json.load(f)
+
+  uids = [401742377,]
+
   MongoDB()
-  logger = get_logger("App")
+  logger = get_logger("BilibiliCrawlerController")
 
   proxies = asyncio.Queue()
   # if PROXIES_PATH.exists():
@@ -277,7 +319,7 @@ if __name__ == "__main__":
 
   if not GENSHIN_AIDS_PATH.exists():
     GENSHIN_MID = 401742377
-    GENSHIN_AIDS = asyncio.run(crawlers[0].fetch_all_user_videos(401742377))
+    GENSHIN_AIDS = asyncio.run(crawlers[0].fetch_all_user_videos(401742377, headers=headers))
     with open(GENSHIN_AIDS_PATH, "w", encoding="utf-8") as f:
       f.write("\n".join(map(str, GENSHIN_AIDS)))
   else:
@@ -295,7 +337,7 @@ if __name__ == "__main__":
         ok = False
         while not ok:
           proxy = None if proxies.empty() else (await proxies.get())
-          ok = await crawler.run_get_comments(aid, headers=HEADERS, proxy=proxy)
+          ok = await crawler.run_get_comments(aid, headers=headers, proxy=proxy)
           await random_sleep(0.3, 0.4)
           if proxy:
             await proxies.put(proxy)
