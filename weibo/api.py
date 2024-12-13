@@ -33,7 +33,8 @@ class get_comments(AsyncAPI):
                  flow: Optional[int] = None,
                  count: int = 20,
                  is_show_bulletin: int = 1,
-                 is_mix: int = 0) -> str:
+                 is_mix: int = 0,
+                 max_id: Optional[int | str] = None) -> str:
     """
     获取微博评论
     Args:
@@ -44,19 +45,22 @@ class get_comments(AsyncAPI):
       flow(int | None): 当主评论按热度排序时，该字段为0；当回复按热度排序时，该字段为0；回复按时间倒序时，该字段为1
       count(int): 每页评论数
       is_show_bulletin(int): 当查看主评论时，为1；查看回复时，为2
-      is_mix: 当查看主评论时，为0；查看回复时，为1
+      is_mix(int): 当查看主评论时，为0；查看回复时，为1
+      max_id(int | None): 爬取第一页时非必要，其余必要，由上一页响应得到
     """
     url = f"https://weibo.com/ajax/statuses/buildComments?is_reload=1&id={id}&is_show_bulletin={is_show_bulletin}&is_mix={is_mix}&count={count}&uid={uid}&fetch_level=0&locale=zh-CN"
     if is_asc is not None:
       url += f"&is_asc={is_asc}"
     if flow is not None:
       url += f"&flow={flow}"
+    if max_id is not None:
+      url += f"&max_id={max_id}"
     return (await client.get(url)).text
 
   @staticmethod
   async def test(headers = None, proxies = None):
     async with AsyncClient(headers=headers, proxies=proxies) as client:
-      return await get_comments.call(client, 6593199887, 5100218874073938, 1, None)
+      return await get_comments.call(client, 6593199887, 5100218874073938, None, 0)
   
 
 if __name__ == "__main__":
