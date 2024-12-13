@@ -29,24 +29,17 @@ async def transfer(redis: Redis,
     logger.info(f"总数量：{length}，块大小：{batch_size}")
 
   for i in range(0, length, batch_size):
-    try:
-      j = min(i + batch_size - 1, length - 1)
-      if logger:
-        logger.info(f"正在写入第{i}-{j}条数据")
-      r = await redis.client.lrange(name, i, j)
-      data = [json.loads(x) for x in r]
-      if not data:
-        break
-      if upsert:
-        await MongoDB.upsert_many(collection, data)
-      else:
-        await collection.insert_many(data)
-    except Exception as e:
-      if logger:
-        logger.exception(e)
-      else:
-        logging.exception(e)
-      return
+    j = min(i + batch_size - 1, length - 1)
+    if logger:
+      logger.info(f"正在写入第{i + 1}-{j + 1}条数据")
+    r = await redis.client.lrange(name, i, j)
+    data = [json.loads(x) for x in r]
+    if not data:
+      break
+    if upsert:
+      await MongoDB.upsert_many(collection, data)
+    else:
+      await collection.insert_many(data)
     
   if delete:
     await redis.client.delete(name)
