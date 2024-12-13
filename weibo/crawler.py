@@ -99,7 +99,7 @@ class WeiboCrawler:
           if not max_id:
             self.logger.info("最后一页，退出")
             break
-          await random_sleep(0.5, 0.7)
+          await random_sleep(0.7, 0.7)
 
         except KeyError as e:
           self.logger.error(f"响应信息中没有键：{e}")
