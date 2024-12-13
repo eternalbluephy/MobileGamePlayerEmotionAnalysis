@@ -28,7 +28,7 @@ async def fetch_reply(client: AsyncClient,
     ps(int): 每页评论数(1-20)
     pn(int): 爬取第几页
   """
-  URL = "http://api.bilibili.com/x/v2/reply"
+  URL = "https://api.bilibili.com/x/v2/reply"
   response = await client.get(f"{URL}?oid={oid}&type=1&sort={int(sort)}&ps={ps}&pn={pn}")
   return response.text
   
@@ -42,7 +42,7 @@ class fetch_reply_wbi(AsyncAPI):
                   mode: int = 3,
                   img_key: Optional[str] = None,
                   sub_key: Optional[str] = None) -> str:
-    URL = "http://api.bilibili.com/x/v2/reply/wbi/main"
+    URL = "https://api.bilibili.com/x/v2/reply/wbi/main"
     if not img_key or not sub_key:
       img_key, sub_key = getWbiKeys()
     params = encWbi({
@@ -53,7 +53,7 @@ class fetch_reply_wbi(AsyncAPI):
   
   @staticmethod
   async def test(headers: dict | None = None, proxy: str | None = None) -> bool:
-    URL = "http://api.bilibili.com/x/v2/reply/wbi/main"
+    URL = "https://api.bilibili.com/x/v2/reply/wbi/main"
     img_key, sub_key = getWbiKeys()
     params = encWbi({
       "oid": 1256438678, "type": 1, "mode": 3, "next": 76642,
@@ -89,7 +89,7 @@ class fetch_reply_reply(AsyncAPI):
       pn(int): 爬取第几页
       return_url(bool): 是否返回请求url
     """
-    url = f"http://api.bilibili.com/x/v2/reply/reply?oid={oid}&type=1&root={rpid}&ps={ps}&pn={pn}"
+    url = f"https://api.bilibili.com/x/v2/reply/reply?oid={oid}&type=1&root={rpid}&ps={ps}&pn={pn}"
     response = await client.get(url)
     if return_url:
       return response.text, url
@@ -98,7 +98,7 @@ class fetch_reply_reply(AsyncAPI):
     
   @staticmethod
   async def test(headers: dict | None = None, proxies: str | None = None) -> bool:
-    url = "http://api.bilibili.com/x/v2/reply/reply?oid=1806390382&type=1&root=238657832256&ps=20&pn=1"
+    url = "https://api.bilibili.com/x/v2/reply/reply?oid=1806390382&type=1&root=238657832256&ps=20&pn=1"
     try:
       async with AsyncClient(headers=headers, proxies=proxies) as client:
         response = await client.get(url)
@@ -122,7 +122,7 @@ async def fetch_tags(client: AsyncClient,
   type = "aid" if bvid is None else "bvid"
   if not id:
     raise ValueError("aid和bvid需要其中一个不为空")
-  URL = "http://api.bilibili.com/x/tag/archive/tags"
+  URL = "https://api.bilibili.com/x/tag/archive/tags"
   response = await client.get(f"{URL}?{type}={id}")
   return response.text
   
@@ -153,7 +153,7 @@ async def fetch_user_videos(client: AsyncClient,
                             pn: int = 1,
                             img_key: Optional[str] = None,
                             sub_key: Optional[str] = None) -> str:
-  URL = "http://api.bilibili.com/x/space/wbi/arc/search"
+  URL = "https://api.bilibili.com/x/space/wbi/arc/search"
   if not img_key or not sub_key:
     img_key, sub_key = getWbiKeys()
   params = encWbi({
@@ -167,7 +167,7 @@ async def fetch_user_info(client: AsyncClient,
                           mid: int,
                           img_key: Optional[str] = None,
                           sub_key: Optional[str] = None) -> str:
-  URL = "http://api.bilibili.com/x/space/wbi/acc/info"
+  URL = "https://api.bilibili.com/x/space/wbi/acc/info"
   if not img_key or not sub_key:
     img_key, sub_key = getWbiKeys()
   params = encWbi({
