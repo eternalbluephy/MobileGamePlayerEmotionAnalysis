@@ -1,47 +1,111 @@
-import urllib.parse
-import aiohttp
+import sys
 import asyncio
-from bili.api import aiohttp_api
+import json
+from pathlib import Path
+from bili.crawler.crawler import BiliCrawler
+from weibo.crawler import WeiboCrawler
+from common.log import get_logger
+from common.db.bridge import transfer
+from common.db.mongo import MongoDB
+from common.crawler import random_sleep
 
-HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-  "Cookie": "buvid3=045FFA68-F00D-9CD3-51BD-CC7EFF43B56C74211infoc; b_nut=1727859074; _uuid=4103EF1011-5BE1-EF93-291E-B48F17BBE1010474375infoc; header_theme_version=CLOSE; enable_web_push=DISABLE; CURRENT_FNVAL=4048; rpdid=|(kJRYmJRmY|0J'u~k~)~)Rkl; buvid_fp_plain=undefined; buvid4=33D3C568-8110-0DA3-7F91-0EDEDD2FF65476357-024100208-EftFjGYzK8e%2BnmvtDmyFEYC8vC7CPXisBgZC93SEz739%2BeRPEAXBVPhLcxB9be7g; LIVE_BUVID=AUTO4417299433676539; PVID=2; SESSDATA=ccf84baf%2C1747890518%2C72b7c%2Ab1CjAZL_G-5mnbS4dvknpKQ-hzSZ_EYiDe7yhcvr8S1IKU3FOUiqN1Eivt-jFXlq4bdmESVkgwUjVPelIyblE2N2lnOE1JTC1XYzlDOUI2RXZ6dXFJd3dmLTdWaU52REpDWEphUXJPTzRZZDlvcm1LdUJWX2ZpbW8yOGNUZTNlZHZDeDNtalpqejdBIIEC; bili_jct=64fe0b1f1d387e0e490a6d65239b9948; DedeUserID=38921801; DedeUserID__ckMd5=b1bdb63ebdbbfd3c; bili_ticket=eyJhbGciOiJIUzI1NiIsImtpZCI6InMwMyIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MzI2MTg1ODQsImlhdCI6MTczMjM1OTMyNCwicGx0IjotMX0.bUbzAeyU2GW7sdRTJHpz_6Rv_3wCQDhUo_9gVPyxGAY; bili_ticket_expires=1732618524; fingerprint=0dab010e3e14d0ef598b5b67f1397bbf; buvid_fp=0dab010e3e14d0ef598b5b67f1397bbf; b_lsid=C3A7DD56_19361C7D31A; match_float_version=ENABLE; bmg_af_switch=1; bmg_src_def_domain=i0.hdslb.com; home_feed_column=4; browser_resolution=947-755; bp_t_offset_38921801=1003621801378447360",
-  "accept-language": "en,zh-CN;q=0.9,zh;q=0.8",
-}
+BILIBILI_ROOT = Path(__file__).parent.joinpath("bili")
+BILIBILI_MAX_PAGES = 100
+WEIBO_ROOT = Path(__file__).parent.joinpath("weibo")
+WEIBO_MAX_PAGES = 10
 
-async def fetch(session: aiohttp.ClientSession, url: str) -> str:
-  async with session.get(url) as response:
-    return await response.text()
+loop = asyncio.new_event_loop()
+logger = get_logger("App")
+bilibili_mids = [401742377, 161775300, 1340190821, 1636034895, 1955897084]
+bilibili_crawlers = [BiliCrawler() for _ in range(5)]
+weibo_uids = [6593199887, 6279793937, 7643376782, 7632078520, 7730797357]
+weibo_crawler = WeiboCrawler()
+fetch_bilibili_videos = "-bilibili-init" in sys.argv
+fetch_weibo_articles = "-weibo-init" in sys.argv
+with open(BILIBILI_ROOT.joinpath("headers.json"), "r", encoding="utf-8") as f:
+  bilibili_headers = json.load(f)
+with open(WEIBO_ROOT.joinpath("headers.json"), "r", encoding="utf-8") as f:
+  weibo_headers = json.load(f)
+
+mongo = MongoDB().client["MobileGameComments"]
+
+async def bili_fetch_all_user_videos(mids) -> bool:
+  for mid in mids:
+    aids = await bilibili_crawlers[0].run_fetch_all_user_videos(mid, headers=bilibili_headers)
+    for aid in aids:
+      ok = await bilibili_crawlers[0].run_get_video_info(aid, headers=bilibili_headers)
+      if not ok:
+        return False
+    await random_sleep(0.5, 0.7)
+  return True
+
+async def weibo_fetch_all_user_blogs(uids):
+  for uid in uids:
+    ok, _ = await weibo_crawler.run_fetch_all_user_blogs(uid, headers=weibo_headers)
+    if not ok:
+      return False
+    await transfer(
+      weibo_crawler.redis, "blogs", mongo["WeiboArticles"], logger=logger
+    )
+  return True
+
+async def bilibili_run_crawler(crawlers: list[BiliCrawler], mids: list[int]):
+  for mid in mids:
+    cursor = mongo["BilibiliVideos"].find({"mid": mid})
+    aids = asyncio.Queue()
+    async for video in cursor:
+      aids.put_nowait(video["_id"])
+
+    async def task(crawler: BiliCrawler):
+      while not aids.empty():
+        aid = await aids.get()
+        ok, _ = await crawler.run_get_comments(aid, headers=bilibili_headers)
+        if not ok:
+          return False
+        await random_sleep(0.3, 0.5)
+
+    tasks = [task(crawler) for crawler in crawlers]
+    await asyncio.gather(*tasks)
+
+async def weibo_run_crawler(crawler: WeiboCrawler, uids: list[int], max_pages: int = 10):
+  for uid in uids:
+    cursor = mongo["WeiboArticles"].find({"uid": uid})
+    async for article in cursor:
+      id = article["_id"]
+      if article["finished"]:
+        logger.info(f"文章{id}已爬取完毕，跳过")
+        continue
+      # 删除已存在的评论，防止重复
+      await mongo["WeiboComments"].delete_many({"blogid": id})
+      ok, _ = await crawler.run_fetch_blog_comments(uid, id, headers=weibo_headers, max_pages=max_pages)
+      if ok:
+        await transfer(crawler.redis, "comments", mongo["WeiboComments"], upsert=False, logger=logger)
+      else:
+        logger.error("爬取评论失败")
+        return False
+      logger.info(f"文章{id} 已爬取完毕")
+      await mongo["WeiboArticles"].update_one({"_id": id}, {"$set": {"finished": True}})
 
 async def main():
-  video_id = "113521522121449"
-  async with aiohttp.ClientSession(headers=HEADERS) as session:
-    response = await aiohttp_api.fetch_reply(session, video_id, pn=1)
-    with open("./res.json", "w", encoding="UTF-8") as f:
-      f.write(str(response))
 
-async def get_tag(aid: int):
-  async with aiohttp.ClientSession(headers=HEADERS) as session:
-    response = await aiohttp_api.fetch_tags(session, aid=aid)
-    with open("./res.json", "w", encoding="UTF-8") as f:
-      f.write(str(response))
+  async def bilibili_task():
+    if fetch_bilibili_videos:
+      ok = await bili_fetch_all_user_videos([1340190821, 1636034895, 1955897084])
+      if not ok:
+        logger.error("获取视频失败")
+        return
+    await bilibili_run_crawler(bilibili_crawlers, bilibili_mids)
 
-async def get_video_info(aid: int):
-  async with aiohttp.ClientSession(headers=HEADERS) as session:
-    response = await aiohttp_api.fetch_video_info(session, aid=aid)
-    with open("./res.json", "w", encoding="UTF-8") as f:
-      f.write(str(response))
+  async def weibo_task():
+    if fetch_weibo_articles:
+      ok = await weibo_fetch_all_user_blogs([7632078520, 7730797357])
+      if not ok:
+        logger.error("获取文章失败")
+        return
+    await weibo_run_crawler(weibo_crawler, weibo_uids, WEIBO_MAX_PAGES)
 
-async def get_user_videos(mid: int):
-  async with aiohttp.ClientSession(headers=HEADERS) as session:
-    response = await aiohttp_api.fetch_user_videos(session, mid, pn=18)
-    with open("./res.json", "w", encoding="utf-8") as f:
-      f.write(str(response))
+  await asyncio.gather(bilibili_task(), weibo_task())
 
-async def get_comments(oid: int, page: int):
-  async with aiohttp.ClientSession(headers=HEADERS) as session:
-    response = await aiohttp_api.fetch_reply_wbi(session, oid, page)
-    with open("./res.json", "w", encoding="utf-8") as f:
-      f.write(str(response))
 
-asyncio.run(get_user_videos(401742377))
+if __name__ == "__main__":
+  asyncio.run(main())
