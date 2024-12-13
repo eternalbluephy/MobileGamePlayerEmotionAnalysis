@@ -48,6 +48,7 @@ class WeiboCrawler:
               st.add(id)
               blog_info = {
                 "_id": id,
+                "uid": blog["user"]["id"],
                 "author": blog["user"]["screen_name"],
                 "text": blog["text_raw"],
                 "reposts": blog["reposts_count"],
@@ -57,9 +58,9 @@ class WeiboCrawler:
                 "finished": False
               }
               await self.redis.client.lpush(f"blogs", json.dumps(blog_info))
-          await random_sleep(0.3, 0.5)
+          await random_sleep(0.5, 0.7)
           self.logger.info(f"第{page}页爬取完毕")
-          if not since_id or page > 2:
+          if not since_id:
             self.logger.info(f"最后一页，退出")
             break
           page += 1
@@ -74,8 +75,45 @@ class WeiboCrawler:
           return False, Err.FAILED
     return True, None
   
-  async def run_fetch_blog_comments(self, uid: int, id: int, ):
+  async def run_fetch_blog_comments(self, uid: int, id: int, max_pages: int = 10, **httpx_params):
     self.logger.info(f"正在爬取 用户{uid} 的 博文{id} 的评论")
+
+    async with AsyncClient(**httpx_params) as client:
+      max_id = None
+      for page in range(1, max_pages + 1):
+        try:
+          self.logger.info(f"正在爬取 文章{id} 第{page}页")
+          # 热度排序
+          res = await get_comments.call(client, uid, id, flow=0, max_id=max_id)
+          data = json.loads(res)
+          comments_data = data["data"]
+          for info in comments_data:
+            comment = {
+              "blogid": id,
+              "time": info["created_at"],
+              "likes": info["like_counts"],
+              "content": info["text_raw"],
+            }
+            await self.redis.client.lpush("comments", json.dumps(comment))
+          max_id = data["max_id"]
+          if not max_id:
+            self.logger.info("最后一页，退出")
+            break
+          await random_sleep(0.5, 0.7)
+
+        except KeyError as e:
+          self.logger.error(f"响应信息中没有键：{e}")
+          return False, Err.FAILED
+        except json.decoder.JSONDecodeError as e:
+          self.logger.error(f"非JSON格式数据：{res}")
+          return False, Err.FAILED
+        except Exception as e:
+          self.logger.exception(e)
+          return False, Err.FAILED
+      
+    return True, None
+
+
     
       
 
@@ -87,20 +125,41 @@ if __name__ == "__main__":
   crawler = WeiboCrawler()
   mongo = MongoDB().client["MobileGameComments"]
   loop = asyncio.new_event_loop()
+  run = loop.run_until_complete
 
   with open(Path(__file__).parent.joinpath("headers.json"), "r", encoding="utf-8") as f:
     headers = json.loads(f.read())
   
-  WEIBO_GENSHIN_UID = 6593199887
+  uids = [6593199887]
 
   if "videos" in sys.argv:
-    ok, blog_infos = loop.run_until_complete(crawler.run_fetch_all_user_blogs(WEIBO_GENSHIN_UID, headers=headers))
-    if not ok:
-      logger.error("获取所有文章失败")
-    else:
-      # TODO: 存入MongoDB
-      loop.run_until_complete(transfer(
-        crawler.redis, mongo, "blogs", mongo["WeiboArticles"], logger=logger
-      ))
-    
+    for uid in uids:
+      ok, _ = run(crawler.run_fetch_all_user_blogs(uid, headers=headers))
+      if not ok:
+        logger.error("获取所有文章失败")
+      else:
+        # TODO: 存入MongoDB
+        run(transfer(
+          crawler.redis, "blogs", mongo["WeiboArticles"], logger=logger
+        ))
   
+  async def main():
+    for uid in uids:
+      cursor = mongo["WeiboArticles"].find({"uid": uid})
+      async for article in cursor:
+        id = article["_id"]
+        if article["finished"]:
+          logger.info(f"文章{id}已爬取完毕，跳过")
+          continue
+        # 删除已存在的评论，防止重复
+        await mongo["WeiboComments"].delete_many({"blogid": id})
+        ok, _ = await crawler.run_fetch_blog_comments(uid, id, headers=headers)
+        if ok:
+          await transfer(crawler.redis, "comments", mongo["WeiboComments"], upsert=False, logger=logger)
+        else:
+          logger.error("爬取评论失败")
+          break
+        logger.info(f"文章{id} 已爬取完毕")
+        await mongo["WeiboArticles"].update_one({"_id": id}, {"$set": {"finished": True}})
+
+  run(main())
