@@ -7,17 +7,16 @@ from .redis import Redis
 
 
 async def transfer(redis: Redis,
-                   mongo: MongoDB,
                    name: str,
                    collection: AsyncIOMotorCollection,
                    upsert: bool = True,
                    batch_size: int = 1000,
-                   logger: logging.Logger | None = None) -> None:
+                   logger: logging.Logger | None = None,
+                   delete: bool = True) -> None:
   """
   将数据从Redis列表中分块写入MongoDB
   Args:
     redis(Redis): redis连接对象
-    mongo(MongoDB): MongoDB连接对象
     name(str): redis list名称
     collection(AsyncIOMotorCollection): 要写入的异步MongoDB集合
     upsert(bool): 是否优先更新而不是插入，默认为True
@@ -29,26 +28,26 @@ async def transfer(redis: Redis,
   if logger:
     logger.info(f"总数量：{length}，块大小：{batch_size}")
 
-  async with await mongo.client.start_session() as session:
-    async with session.start_transaction():
-      for i in range(0, length, batch_size):
-        try:
-          j = min(i + batch_size - 1, length - 1)
-          if logger:
-            logger.info(f"正在写入第{i}-{j}条数据")
-          r = await redis.client.lrange(name, i, j)
-          data = [json.loads(x) for x in r]
-          if not data:
-            break
-          if upsert:
-            await MongoDB.upsert_many(collection, data, session)
-          else:
-            await collection.insert_many(data, session=session)
-        except Exception as e:
-          await session.abort_transaction()
-          if logger:
-            logger.exception(e)
-          else:
-            logging.exception(e)
-          return
+  for i in range(0, length, batch_size):
+    try:
+      j = min(i + batch_size - 1, length - 1)
+      if logger:
+        logger.info(f"正在写入第{i}-{j}条数据")
+      r = await redis.client.lrange(name, i, j)
+      data = [json.loads(x) for x in r]
+      if not data:
+        break
+      if upsert:
+        await MongoDB.upsert_many(collection, data)
+      else:
+        await collection.insert_many(data)
+    except Exception as e:
+      if logger:
+        logger.exception(e)
+      else:
+        logging.exception(e)
+      return
+    
+  if delete:
+    await redis.client.delete(name)
     
