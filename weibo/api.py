@@ -34,7 +34,8 @@ class get_comments(AsyncAPI):
                  count: int = 20,
                  is_show_bulletin: int = 1,
                  is_mix: int = 0,
-                 max_id: Optional[int | str] = None) -> str:
+                 max_id: Optional[int | str] = None,
+                 return_url: bool = False) -> str | tuple[str, str]:
     """
     获取微博评论
     Args:
@@ -55,7 +56,11 @@ class get_comments(AsyncAPI):
       url += f"&flow={flow}"
     if max_id is not None:
       url += f"&max_id={max_id}"
-    return (await client.get(url)).text
+    res = (await client.get(url)).text
+    if return_url:
+      return res, url
+    else:
+      return res
 
   @staticmethod
   async def test(headers = None, proxies = None):

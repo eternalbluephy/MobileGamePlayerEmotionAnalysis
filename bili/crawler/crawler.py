@@ -4,7 +4,7 @@ import asyncio
 import httpx
 from copy import deepcopy
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from time import sleep
 
 import_path = Path(__file__).parent.parent.parent
@@ -13,6 +13,8 @@ sys.path.append(str(import_path))
 from common.crawler import random_sleep, Err, CrawlResult
 from common.log import get_logger
 from common.db.mongo import MongoDB
+from common.db.redis import Redis
+from common.db.bridge import transfer
 from bili.api import api
 from bili.api.enums import STATUS_CODES, StatusCode
 from bili.api.wbi import getWbiKeys
@@ -28,6 +30,7 @@ class BiliCrawler:
     # 爬虫ID
     BiliCrawler.crawler_count += 1
     self.id = BiliCrawler.crawler_count
+    self.redis = Redis(db=self.id)
     self.logger = get_logger(f"Bilibili#{self.id}")
 
   async def fetch_one_reply_reply(self, client: httpx.Client, aid: int, rpid: int, page: int) -> CrawlResult:
@@ -110,7 +113,7 @@ class BiliCrawler:
         comment["like"] = reply["like"]
         comment["rpid"] = reply["rpid"]
         comment["is_root"] = True
-        await self.db["BilibiliComments"].insert_one(comment)
+        await self.redis.client.lpush("BilibiliComments", json.dumps(comment))
         # 子评论
         for rreply in reply["replies"]:
           sub_comment = {}
@@ -122,8 +125,7 @@ class BiliCrawler:
           sub_comment["like"] = rreply["like"]
           sub_comment["rpid"] = rreply["rpid"]
           sub_comment["is_root"] = False
-          await self.db["BilibiliComments"].insert_one(sub_comment)
-      await self.db["BilibiliVideos"].update_one({"_id": aid}, {"$set": {"last_page": page}})
+          await self.redis.client.lpush("BilibiliComments", json.dumps(sub_comment))
     except KeyError as e:
       self.logger.warning(f"响应信息中没有键：{e}")
       return False, Err.FAILED
@@ -145,6 +147,8 @@ class BiliCrawler:
         return res, err
       elif err == Err.EOF:
         self.logger.info(f"视频 av{aid} 所有评论爬取完毕")
+        await transfer(self.redis, "BilibiliComments", self.db["BilibiliComments"], upsert=False, logger=self.logger)
+        await self.db["BilibiliVideos"].update_one({"_id": aid}, {"$set": {"finished": True}})
         break
       # await random_sleep(0.1, 0.3)
     return True, None
@@ -164,6 +168,7 @@ class BiliCrawler:
         "title": data["data"]["title"],
         "view": data["data"]["stat"]["view"],
         "like": data["data"]["stat"]["like"],
+        "comments": data["data"]["stat"]["reply"],
         "pubtime": int(data["data"]["pubdate"]),
       }
     except KeyError as e:
@@ -185,21 +190,22 @@ class BiliCrawler:
 
     async with httpx.AsyncClient(headers=headers, proxies=proxy, verify=False, follow_redirects=True) as client:
 
-      last_page = await self.get_last_page(aid)
-      if last_page is None:
+      finished = await self.is_finished(aid)
+      if finished is None:
         self.logger.warning(f"数据库中无此视频（av{aid}）数据，跳过")
-        return False, Err.NOT_EXISTS
-      else:
-        self.logger.info("数据库中已存在该视频，将在已存储的数据的基础上更新")
+        return True, None
+      if finished:
+        self.logger.info(f"视频{aid} 已爬取完毕，跳过")
+        return True, None
 
-      res, err = await self.fetch_video_comments(client, aid, start_page=last_page + 1)
+      res, err = await self.fetch_video_comments(client, aid, start_page=1)
       if not res:
         return res, err
         
     self.logger.info(f"视频 av{aid} 评论爬取完毕")
     return True, None
   
-  async def run_get_video_info(self, aid: int, headers: Optional[dict] = None, proxy: Optional[str] = None) -> bool:
+  async def run_get_video_info(self, aid: int, filter: Callable | None = None, headers: Optional[dict] = None, proxy: Optional[str] = None) -> bool:
     self.logger.info(f"正在爬取视频 av{aid} 的基本信息")
     if not headers:
       self.logger.warning("未设置请求头，可能无法正常爬取数据")
@@ -218,9 +224,11 @@ class BiliCrawler:
           await random_sleep(0.3, 0.4)
           return False
         document.update(info)
-        async with BiliCrawler.lock:
-          await self.db["BilibiliVideos"].update_one({"_id": aid}, {"$set": document}, upsert=True)
-        last_page = 0
+        if not filter or filter(document):
+          async with BiliCrawler.lock:
+            await self.db["BilibiliVideos"].update_one({"_id": aid}, {"$set": document}, upsert=True)
+        else:
+          self.logger.info(f"视频{aid} 被过滤")
         await random_sleep(0.3, 0.4)
       else:
         self.logger.info("数据库中已存在该视频，跳过")
@@ -232,6 +240,10 @@ class BiliCrawler:
     async with BiliCrawler.lock:
       result = await self.db["BilibiliVideos"].find_one({"_id": aid})
     return result if result is None else result["last_page"]
+  
+  async def is_finished(self, aid: int) -> Optional[bool]:
+    result = await self.db["BilibiliVideos"].find_one({"_id": aid})
+    return result if result is None else result["finished"]
   
   async def run_fetch_all_user_videos(self,
                                       mid: int,

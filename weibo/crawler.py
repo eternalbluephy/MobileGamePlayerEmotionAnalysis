@@ -4,7 +4,7 @@ import asyncio
 import httpx
 from redis import asyncio as aioredis
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from time import sleep
 
 import_path = Path(__file__).parent.parent.parent
@@ -27,7 +27,7 @@ class WeiboCrawler:
     self.logger = get_logger(f"Weibo#{self.id}")
     self.redis = Redis(db=self.id)
 
-  async def run_fetch_all_user_blogs(self, uid: int, **httpx_params) -> CrawlResult:
+  async def run_fetch_all_user_blogs(self, uid: int, filter: Callable | None = None, **httpx_params) -> CrawlResult:
     """运行爬虫，获取指定uid用户的所有文章，并存储每个文章的数据"""
     self.logger.info(f"正在爬取 用户{uid} 的所有博文ID")
     st = set()
@@ -48,7 +48,7 @@ class WeiboCrawler:
               st.add(id)
               blog_info = {
                 "_id": id,
-                "uid": blog["user"]["id"],
+                "uid": int(blog["user"]["id"]),
                 "author": blog["user"]["screen_name"],
                 "text": blog["text_raw"],
                 "reposts": blog["reposts_count"],
@@ -57,7 +57,10 @@ class WeiboCrawler:
                 "time": blog["created_at"],
                 "finished": False
               }
-              await self.redis.client.lpush(f"blogs", json.dumps(blog_info))
+              if filter is None or filter(blog_info):
+                await self.redis.client.lpush(f"blogs", json.dumps(blog_info))
+              else:
+                self.logger.info(f"文章{id}被过滤")
           await random_sleep(0.5, 0.7)
           self.logger.info(f"第{page}页爬取完毕")
           if not since_id:
@@ -76,7 +79,7 @@ class WeiboCrawler:
     return True, None
   
   async def run_fetch_blog_comments(self, uid: int, id: int, max_pages: int = 10, **httpx_params):
-    self.logger.info(f"正在爬取 用户{uid} 的 博文{id} 的评论")
+    self.logger.info(f"正在爬取 用户{uid} 文章{id} 的评论")
 
     async with AsyncClient(**httpx_params) as client:
       max_id = None
@@ -84,7 +87,7 @@ class WeiboCrawler:
         try:
           self.logger.info(f"正在爬取 文章{id} 第{page}页")
           # 热度排序
-          res = await get_comments.call(client, uid, id, flow=0, max_id=max_id)
+          res, url = await get_comments.call(client, uid, id, flow=0, max_id=max_id, return_url=True)
           data = json.loads(res)
           comments_data = data["data"]
           for info in comments_data:
@@ -99,13 +102,14 @@ class WeiboCrawler:
           if not max_id:
             self.logger.info("最后一页，退出")
             break
-          await random_sleep(0.7, 0.7)
+          await random_sleep(0.5, 0.7)
 
         except KeyError as e:
           self.logger.error(f"响应信息中没有键：{e}")
           return False, Err.FAILED
         except json.decoder.JSONDecodeError as e:
           self.logger.error(f"非JSON格式数据：{res}")
+          self.logger.info(f"可以尝试访问{url}")
           return False, Err.FAILED
         except Exception as e:
           self.logger.exception(e)

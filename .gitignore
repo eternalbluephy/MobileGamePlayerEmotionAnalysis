@@ -13,3 +13,5 @@
 **/headers.*
 # 代理ip
 /proxies.txt
+# 中间文件
+**/mdf.csv
